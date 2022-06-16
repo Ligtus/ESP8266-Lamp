@@ -7,19 +7,19 @@
 using namespace std;
 
 #define NUM_LEDS 2
+#define RESET_PIN D2
 #define DATA_PIN D3
-#define CLOCK_PIN D4
+#define CLOCK_PIN D5
 #define LED_TYPE WS2801
 
 CRGB leds[NUM_LEDS];
 
-const int ledPin = LED_BUILTIN;
 const uint16_t ledCount = 2;
 const int dataPin = 10;
 const int clockPin = 9;
 const string lamp_name = "Lámpara de ejemplo";
 unsigned long millis_last_ping = 0, millis_current = 0, millis_color_changed = 0;
-const int update_interval = 10000, shutdown_interval = 60000; // 10 million miliseconds, or 10 seconds to ping, or 60 seconds to shutdown
+const int ping_interval = 10000, shutdown_interval = 60000, update_interval = 1000; // 10 million miliseconds, or 10 seconds to ping, or 60 seconds to shutdown
 IPAddress multicast_group(239, 255, 255, 128);
 int port_mcast = 11555;
 int port_unicast = 11556;
@@ -28,37 +28,26 @@ WiFiManager wifiManager;
 char packetBuffer[256];
 string msg;
 string ping_multicast;
-
+boolean fading = false;
+CRGB new_color_rgb;
+TBlendType blend_type = LINEARBLEND;
+int current_brightness = 0;
 
 void setup() {
+  // Initialize the LED strip
   FastLED.addLeds<LED_TYPE, DATA_PIN, CLOCK_PIN>(leds, NUM_LEDS);
 
-  // Initialize the LED strip
+  // Set reset pin to input
+  pinMode(RESET_PIN, INPUT_PULLUP);
 
   // Set builtin pin to output, and set it to HIGH
-  pinMode(ledPin, OUTPUT);
-  digitalWrite(ledPin, HIGH);
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  wifiManager.autoConnect();
 
   // Initialize Serial Communication
   Serial.begin(9600);
-
-  // Set WiFiManager timeout to 120 seconds
-  // After this time, the ESP will enter AP mode
-  wifiManager.setTimeout(120);
-
-  // Attempt to connect to WiFi network
-  if(!wifiManager.autoConnect("ESP", "123")){
-    Serial.println("failed to connect and hit timeout");
-    delay(3000);
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(5000);
-  }
-
-  // If we connected, print out the IP address
-  Serial.println("Conectado!");
-
-  Serial.println("local ip");
 
   Serial.println(WiFi.localIP());
 
@@ -67,17 +56,22 @@ void setup() {
 
   // Initialize UDP listener
   wifiudp.begin(port_unicast);
-}
 
-void blink(int ms)
-{
-  digitalWrite(ledPin, LOW);
-  delay(ms/2);
-  digitalWrite(ledPin, HIGH);
-  delay(ms/2);
+  // Set LEDs to black
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
 }
 
 void loop() { 
+
+  // Check if the reset button is pressed
+  if(digitalRead(RESET_PIN) == LOW) {
+    wifiManager.startConfigPortal("Example lamp", "12345678");
+    Serial.println("Access Point connected...");
+  }
+
+  // Update actual running time
+  millis_current = millis();
 
   // Listen for incoming UDP packets
   int packetSize = wifiudp.parsePacket();
@@ -86,7 +80,6 @@ void loop() {
   if(packetSize){
     // Print out the packet
     Serial.println("Packet received");
-    blink(200);
     int packetLen = wifiudp.read(packetBuffer, 256);
     if(packetLen > 0){
       // Terminate the string, setting the last character to 0
@@ -103,20 +96,26 @@ void loop() {
         Serial.println(color.c_str());
         // Convert the color to an integer from base 16
         uint32 color_int = strtol(color.c_str(), NULL, 16);
-        // Set the LED to the color and show it
-        leds[0] = color_int;
-        FastLED.show();
 
-        // Update the time of the last color change
-        millis_color_changed = millis();
+        new_color_rgb = CRGB(color_int);
       }
     }
   }
+  
+  if (!fading && leds[0] != new_color_rgb) {
+    EVERY_N_MILLIS(2) {
+      leds[0] = nblend(leds[0], new_color_rgb, 8);
+      if (millis_current - millis_color_changed > update_interval) {
+        leds[0] = new_color_rgb;
+        millis_color_changed = millis_current;
+      }
+      fill_solid(leds, NUM_LEDS, leds[0]);
+      FastLED.show();
+    }
+  }
+  
 
-  // Update actual running time
-  millis_current = millis();
-
-  if ((unsigned long)(millis_current - millis_last_ping) >= update_interval) {
+  if ((unsigned long)(millis_current - millis_last_ping) >= ping_interval) {
     // Send a ping to the multicast group every 10 seconds
     Serial.println("Sending ping");
 
@@ -130,8 +129,16 @@ void loop() {
 
   if ((unsigned long)(millis_current - millis_color_changed) >= shutdown_interval) {
     // Set the LED to black and show it if it has not been changed in the last 60 seconds
-    leds[0] = CRGB::Black;
-    FastLED.show();
-  }
+    EVERY_N_MILLIS(15) {
+      fading = true;
+      fadeToBlackBy(leds, NUM_LEDS, 10);
+      FastLED.show();
+    }
 
+    if (leds[0] == CRGB(0,0,0)) {
+      // If the LED is black, turn it off
+      new_color_rgb = CRGB::Black;
+      fading = false;
+    }
+  }
 }
